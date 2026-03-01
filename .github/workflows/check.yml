@@ -27,7 +27,10 @@ jobs:
           BOOK_URL: "https://bookingsus.newbook.cloud/online/havasupai"
           ARRIVAL: "2026-05-25"
           DEPARTURE: "2026-05-28"
-          PEOPLE: "2"
+          ADULTS: "2"
+
+          # Turn this ON for ONE run to verify email works, then set back to "0"
+          SEND_TEST_EMAIL: "0"
 
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
