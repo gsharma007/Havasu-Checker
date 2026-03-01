@@ -9,10 +9,12 @@ STATE_FILE = "state.json"
 
 BOOK_URL = os.getenv("BOOK_URL", "https://bookingsus.newbook.cloud/online/havasupai")
 
-# Dates: YYYY-MM-DD
+# Inputs: YYYY-MM-DD
 ARRIVAL = os.getenv("ARRIVAL", "2026-05-25")
 DEPARTURE = os.getenv("DEPARTURE", "2026-05-28")
-PEOPLE = os.getenv("PEOPLE", "2")
+ADULTS = int(os.getenv("ADULTS", "2"))  # Guests shown like 1A, 2A
+
+SEND_TEST_EMAIL = os.getenv("SEND_TEST_EMAIL", "0") == "1"
 
 SMTP_HOST = os.getenv("SMTP_HOST")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -37,7 +39,7 @@ def save_state(state):
 
 
 def send_email(subject: str, body: str):
-    if not all([SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, ALERT_TO]):
+    if not all([SMTP_HOST, SMTP_USER, SMTP_PASS, ALERT_TO]):
         raise RuntimeError(
             "Missing SMTP env vars. Add GitHub Secrets: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, ALERT_TO"
         )
@@ -54,115 +56,14 @@ def send_email(subject: str, body: str):
         s.send_message(msg)
 
 
-def to_mmddyyyy(date_yyyy_mm_dd: str) -> str:
-    y, m, d = date_yyyy_mm_dd.split("-")
-    return f"{m}/{d}/{y}"
-
-
-def fill_input(page, locator, value: str) -> bool:
-    try:
-        locator.wait_for(state="attached", timeout=3000)
-        locator.scroll_into_view_if_needed(timeout=3000)
-        locator.click(timeout=3000)
-        locator.fill(value, timeout=3000)
-        # Trigger events that some JS frameworks rely on
-        locator.press("Tab", timeout=1000)
-        return True
-    except Exception:
-        return False
-
-
-def try_fill_date(page, label_text: str, ymd: str) -> bool:
-    candidates = [ymd, to_mmddyyyy(ymd)]
-
-    # 1) Accessible label
-    for v in candidates:
-        try:
-            if fill_input(page, page.get_by_label(label_text), v):
-                return True
-        except Exception:
-            pass
-
-    # 2) Nearby input after visible label text
-    for v in candidates:
-        try:
-            lbl = page.get_by_text(label_text, exact=False)
-            inp = lbl.locator("xpath=following::input[1]")
-            if fill_input(page, inp, v):
-                return True
-        except Exception:
-            pass
-
-    # 3) Common input names/ids (best-effort)
-    for v in candidates:
-        for sel in ["input[name*='arrival' i]", "input[name*='start' i]", "input[id*='arrival' i]", "input[id*='start' i]"]:
-            if "Departure" in label_text:
-                sel = sel.replace("arrival", "departure").replace("start", "end")
-            loc = page.locator(sel)
-            if loc.count() > 0 and fill_input(page, loc.first, v):
-                return True
-
-    return False
-
-
-def try_fill_people(page, people: str) -> bool:
-    # 1) Accessible label
-    for label in ["People (over 6 years old):", "People (over 6 years old)", "People"]:
-        try:
-            if fill_input(page, page.get_by_label(label), people):
-                return True
-        except Exception:
-            pass
-
-    # 2) Text then following input
-    try:
-        loc = page.get_by_text("People", exact=False).locator("xpath=following::input[1]")
-        if fill_input(page, loc, people):
-            return True
-    except Exception:
-        pass
-
-    # 3) Any number input on page (last resort)
-    try:
-        num = page.locator("input[type='number']")
-        if num.count() > 0 and fill_input(page, num.first, people):
-            return True
-    except Exception:
-        pass
-
-    return False
-
-
-def click_apply_best_effort(page) -> bool:
-    """
-    Click an enabled Apply button. If none becomes enabled, return False (don't crash).
-    """
-    # Wait for any Apply button that is enabled (not disabled)
-    try:
-        page.wait_for_function(
-            """
-            () => {
-              const btns = Array.from(document.querySelectorAll("button"));
-              return btns.some(b => b && b.textContent && b.textContent.trim()==="Apply" && !b.disabled && b.offsetParent !== null);
-            }
-            """,
-            timeout=30000,
-        )
-    except PWTimeout:
-        return False
-
-    # Click the first visible enabled Apply button
-    btn = page.locator("button:has-text('Apply'):not([disabled])").first
-    try:
-        btn.scroll_into_view_if_needed(timeout=5000)
-        btn.click(timeout=10000)
-        return True
-    except Exception:
-        return False
+def fmt_newbook(date_yyyy_mm_dd: str) -> str:
+    # UI shows like "May 25 2026"
+    dt = datetime.strptime(date_yyyy_mm_dd, "%Y-%m-%d")
+    return dt.strftime("%B %d %Y")
 
 
 def write_debug(page, note: str):
-    # Always write debug; workflow will upload artifacts
+    # Always capture artifacts for visibility
     try:
         page.screenshot(path="debug.png", full_page=True)
     except Exception:
@@ -179,6 +80,99 @@ def write_debug(page, note: str):
         pass
 
 
+def fill_by_label(page, label: str, value: str) -> bool:
+    """
+    Fill a labeled input and trigger change.
+    """
+    try:
+        inp = page.get_by_label(label)
+        inp.wait_for(state="visible", timeout=20000)
+        inp.click(timeout=5000)
+        inp.fill(value, timeout=5000)
+        inp.press("Tab", timeout=2000)  # trigger blur/change
+        return True
+    except Exception:
+        return False
+
+
+def set_guests(page, adults: int) -> bool:
+    """
+    Guests UI shows something like 1A/2A.
+    We click the Guests field, then choose "2A".
+    If that isn't available, try plus button fallback.
+    """
+    target = f"{adults}A"
+
+    # 1) Click the Guests input/box (near label "Guests:")
+    opened = False
+    try:
+        page.get_by_text("Guests:", exact=False).wait_for(timeout=20000)
+        # click something right after "Guests:" label (input/button/div)
+        box = page.get_by_text("Guests:", exact=False).locator(
+            "xpath=following::*[self::input or self::button or self::div][1]"
+        )
+        box.click(timeout=5000)
+        opened = True
+    except Exception:
+        pass
+
+    # 2) Fallback: click existing value "1A" if visible
+    if not opened:
+        try:
+            page.get_by_text("1A", exact=True).click(timeout=5000)
+            opened = True
+        except Exception:
+            pass
+
+    if not opened:
+        return False
+
+    # 3) Try click exact option text like "2A"
+    try:
+        page.get_by_text(target, exact=True).click(timeout=5000)
+        return True
+    except Exception:
+        pass
+
+    # 4) Fallback: try plus button inside guest picker
+    try:
+        # Some pickers show + / - controls for guests.
+        # Click + (adults-1) times. (Assumes it started at 1)
+        plus = page.locator("button:has-text('+')").first
+        for _ in range(max(0, adults - 1)):
+            plus.click(timeout=3000)
+        page.keyboard.press("Escape")
+        return True
+    except Exception:
+        return False
+
+
+def click_show_availability(page) -> bool:
+    """
+    Click 'Show availability' button in the Campground Permits card.
+    """
+    try:
+        page.get_by_text("Campground Permits", exact=False).wait_for(timeout=30000)
+    except Exception:
+        return False
+
+    # Prefer role-based button locator
+    try:
+        btn = page.get_by_role("button", name="Show availability").first
+        btn.wait_for(state="visible", timeout=30000)
+        btn.click(timeout=15000)
+        return True
+    except Exception:
+        pass
+
+    # Fallback by text
+    try:
+        page.get_by_text("Show availability", exact=False).first.click(timeout=15000)
+        return True
+    except Exception:
+        return False
+
+
 def check_once():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -186,50 +180,58 @@ def check_once():
         page = context.new_page()
 
         page.goto(BOOK_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(10000)  # give Newbook time to render fully
-
-        arrival_ok = try_fill_date(page, "Arrival date:", ARRIVAL)
-        departure_ok = try_fill_date(page, "Departure date:", DEPARTURE)
-        people_ok = try_fill_people(page, str(PEOPLE))
-
-        note = f"arrival_ok={arrival_ok}, departure_ok={departure_ok}, people_ok={people_ok}"
-
-        # Try to click Apply; if it never enables, save debug + return CLOSED gracefully
-        applied = click_apply_best_effort(page)
-        if not applied:
-            write_debug(page, "Apply never became enabled/visible. " + note)
-            browser.close()
-            return False, "CLOSED (could not click Apply). " + note
-
-        # Wait results update
         page.wait_for_timeout(8000)
 
-        body_text = page.inner_text("body").lower()
+        arrival_str = fmt_newbook(ARRIVAL)
+        departure_str = fmt_newbook(DEPARTURE)
 
-        has_add_booking = "add booking" in body_text
-        has_checkout = "check out" in body_text or "checkout" in body_text
-        has_loading = "loading availability" in body_text
-        has_no_avail = any(k in body_text for k in ["no availability", "not available", "sold out", "unavailable"])
+        arrival_ok = fill_by_label(page, "Arrival date:", arrival_str)
+        departure_ok = fill_by_label(page, "Departure date:", departure_str)
+        guests_ok = set_guests(page, ADULTS)
 
-        if has_loading:
-            page.wait_for_timeout(8000)
-            body_text = page.inner_text("body").lower()
-            has_add_booking = "add booking" in body_text
-            has_checkout = "check out" in body_text or "checkout" in body_text
-            has_no_avail = any(k in body_text for k in ["no availability", "not available", "sold out", "unavailable"])
+        note = (
+            f"arrival_ok={arrival_ok}, departure_ok={departure_ok}, guests_ok={guests_ok}, "
+            f"arrival='{arrival_str}', departure='{departure_str}', adults={ADULTS}"
+        )
 
-        # Save debug every run (helps confirm what it saw)
+        show_ok = click_show_availability(page)
+        if not show_ok:
+            write_debug(page, "Could not click 'Show availability'. " + note)
+            browser.close()
+            return False, "CLOSED (could not open availability). " + note
+
+        page.wait_for_timeout(8000)
+
+        body = page.inner_text("body").lower()
+
+        # Signals
+        has_add_booking = "add booking" in body
+        has_checkout = "check out" in body or "checkout" in body
+        has_criteria_error = "do not meet the required criteria" in body
+        has_no_avail = any(k in body for k in ["no availability", "not available", "sold out", "unavailable"])
+
         write_debug(page, "Run completed. " + note)
-
         browser.close()
 
-        if (has_add_booking or has_checkout) and not has_no_avail:
-            return True, "OPEN signals found. " + note
-        return False, "CLOSED (no open signals after Apply). " + note
+        if (has_add_booking or has_checkout) and not has_no_avail and not has_criteria_error:
+            return True, "OPEN signals found (Add Booking/Checkout). " + note
+
+        if has_criteria_error:
+            return False, "CLOSED (criteria error shown). " + note
+
+        return False, "CLOSED (no open signals). " + note
 
 
 def main():
-    key = f"{ARRIVAL}_{DEPARTURE}_{PEOPLE}"
+    # Optional: send a test email to confirm SMTP works
+    if SEND_TEST_EMAIL:
+        send_email(
+            subject="Havasupai checker: test email ✅",
+            body="If you received this, GitHub Actions → Gmail SMTP is working."
+        )
+        print("TEST EMAIL SENT")
+
+    key = f"{ARRIVAL}_{DEPARTURE}_{ADULTS}"
     state = load_state()
     already_alerted = state.get(key, {}).get("alerted", False)
 
@@ -237,7 +239,7 @@ def main():
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
     if is_open and not already_alerted:
-        subject = f"Havasupai may be OPEN: {ARRIVAL} to {DEPARTURE} for {PEOPLE} people"
+        subject = f"Havasupai may be OPEN: {ARRIVAL} to {DEPARTURE} for {ADULTS} adults"
         body = (
             f"{detail}\n"
             f"Checked: {now}\n\n"
