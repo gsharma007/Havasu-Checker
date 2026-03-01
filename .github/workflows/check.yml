@@ -2,7 +2,7 @@ name: Havasupai alert
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -29,8 +29,8 @@ jobs:
           DEPARTURE: "2026-05-28"
           ADULTS: "2"
 
-          # Turn this ON for ONE run to verify email works, then set back to "0"
-          SEND_TEST_EMAIL: "0"
+          # Set to "1" for ONE run to confirm SMTP works, then put back to "0"
+          SEND_TEST_EMAIL: "1"
 
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
