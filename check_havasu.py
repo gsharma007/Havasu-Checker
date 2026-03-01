@@ -12,7 +12,7 @@ BOOK_URL = os.getenv("BOOK_URL", "https://bookingsus.newbook.cloud/online/havasu
 # Inputs: YYYY-MM-DD
 ARRIVAL = os.getenv("ARRIVAL", "2026-05-25")
 DEPARTURE = os.getenv("DEPARTURE", "2026-05-28")
-ADULTS = int(os.getenv("ADULTS", "2"))  # Guests shown like 1A, 2A
+ADULTS = int(os.getenv("ADULTS", "2"))
 
 SEND_TEST_EMAIL = os.getenv("SEND_TEST_EMAIL", "0") == "1"
 
@@ -57,13 +57,13 @@ def send_email(subject: str, body: str):
 
 
 def fmt_newbook(date_yyyy_mm_dd: str) -> str:
-    # UI shows like "May 25 2026"
+    # UI accepts like "May 25 2026"
     dt = datetime.strptime(date_yyyy_mm_dd, "%Y-%m-%d")
     return dt.strftime("%B %d %Y")
 
 
 def write_debug(page, note: str):
-    # Always capture artifacts for visibility
+    # Always capture artifacts so we can see what the runner saw
     try:
         page.screenshot(path="debug.png", full_page=True)
     except Exception:
@@ -80,97 +80,142 @@ def write_debug(page, note: str):
         pass
 
 
-def fill_by_label(page, label: str, value: str) -> bool:
+def fill_input_near_text(page, label_text: str, value: str) -> bool:
     """
-    Fill a labeled input and trigger change.
+    Works with this UI: the visible label is plain text ("Arrival date:")
+    and the input is the first following input element.
     """
     try:
-        inp = page.get_by_label(label)
+        lbl = page.get_by_text(label_text, exact=False)
+        lbl.wait_for(state="visible", timeout=20000)
+        inp = lbl.locator("xpath=following::input[1]")
         inp.wait_for(state="visible", timeout=20000)
+
         inp.click(timeout=5000)
+        # replace whatever is there
+        inp.press("Control+A", timeout=2000)
         inp.fill(value, timeout=5000)
-        inp.press("Tab", timeout=2000)  # trigger blur/change
+        inp.press("Tab", timeout=2000)
         return True
     except Exception:
         return False
 
 
-def set_guests(page, adults: int) -> bool:
+def open_guests_popover(page) -> bool:
     """
-    Guests UI shows something like 1A/2A.
-    We click the Guests field, then choose "2A".
-    If that isn't available, try plus button fallback.
+    Click Guests value (e.g. '1A') so the popover with +/- and Apply opens.
     """
-    target = f"{adults}A"
-
-    # 1) Click the Guests input/box (near label "Guests:")
-    opened = False
     try:
-        page.get_by_text("Guests:", exact=False).wait_for(timeout=20000)
-        # click something right after "Guests:" label (input/button/div)
-        box = page.get_by_text("Guests:", exact=False).locator(
-            "xpath=following::*[self::input or self::button or self::div][1]"
-        )
-        box.click(timeout=5000)
-        opened = True
+        # click the Guests input right after "Guests:"
+        lbl = page.get_by_text("Guests:", exact=False)
+        lbl.wait_for(state="visible", timeout=20000)
+        guests_input = lbl.locator("xpath=following::input[1]")
+        guests_input.wait_for(state="visible", timeout=20000)
+        guests_input.click(timeout=5000)
+        return True
     except Exception:
-        pass
-
-    # 2) Fallback: click existing value "1A" if visible
-    if not opened:
+        # fallback: click "1A" text if visible
         try:
             page.get_by_text("1A", exact=True).click(timeout=5000)
-            opened = True
+            return True
         except Exception:
-            pass
-
-    if not opened:
-        return False
-
-    # 3) Try click exact option text like "2A"
-    try:
-        page.get_by_text(target, exact=True).click(timeout=5000)
-        return True
-    except Exception:
-        pass
-
-    # 4) Fallback: try plus button inside guest picker
-    try:
-        # Some pickers show + / - controls for guests.
-        # Click + (adults-1) times. (Assumes it started at 1)
-        plus = page.locator("button:has-text('+')").first
-        for _ in range(max(0, adults - 1)):
-            plus.click(timeout=3000)
-        page.keyboard.press("Escape")
-        return True
-    except Exception:
-        return False
+            return False
 
 
-def click_show_availability(page) -> bool:
+def set_guests_and_apply(page, adults: int) -> bool:
     """
-    Click 'Show availability' button in the Campground Permits card.
+    In your screenshot, guests are adjusted in a popover:
+    'People (over 6 years old):' with - / value / + and an Apply button.
+    """
+    if not open_guests_popover(page):
+        return False
+
+    # Find the popover by the text inside it
+    try:
+        pop = page.get_by_text("People (over 6 years old):", exact=False)
+        pop.wait_for(state="visible", timeout=20000)
+    except Exception:
+        return False
+
+    # The number box is typically an input in between - and +
+    # We'll locate the nearest input after that text.
+    try:
+        count_input = page.get_by_text("People (over 6 years old):", exact=False).locator(
+            "xpath=following::input[1]"
+        )
+        count_input.wait_for(state="visible", timeout=20000)
+        current_raw = count_input.input_value(timeout=3000)
+        current = int("".join([c for c in current_raw if c.isdigit()]) or "1")
+    except Exception:
+        # If we can't read it, assume starting at 1
+        current = 1
+
+    # Click + until we reach desired adults
+    try:
+        plus_btn = page.get_by_text("People (over 6 years old):", exact=False).locator(
+            "xpath=following::button[.='+' or contains(.,'+')][1]"
+        )
+        plus_btn.wait_for(state="visible", timeout=20000)
+
+        if adults > current:
+            for _ in range(adults - current):
+                plus_btn.click(timeout=5000)
+    except Exception:
+        return False
+
+    # Click Apply inside the popover
+    try:
+        apply_btn = page.locator("button:has-text('Apply')").filter(has_not=page.locator("[disabled]")).first
+        # If filter above is too strict, just click the first visible Apply:
+        try:
+            apply_btn.wait_for(state="visible", timeout=20000)
+            apply_btn.click(timeout=10000)
+        except Exception:
+            page.get_by_text("Apply", exact=True).click(timeout=10000)
+        return True
+    except Exception:
+        return False
+
+
+def click_show_availability_for_campground(page) -> bool:
+    """
+    Click 'Show availability' on the Campground Permits card.
     """
     try:
         page.get_by_text("Campground Permits", exact=False).wait_for(timeout=30000)
     except Exception:
         return False
 
-    # Prefer role-based button locator
+    # Click first "Show availability" under campground section.
+    # (There is also one for Lodge, so we anchor near Campground Permits.)
     try:
-        btn = page.get_by_role("button", name="Show availability").first
-        btn.wait_for(state="visible", timeout=30000)
-        btn.click(timeout=15000)
+        section = page.get_by_text("Campground Permits", exact=False).locator("xpath=ancestor::div[1]")
+        btn = section.get_by_text("Show availability", exact=False)
+        btn.first.click(timeout=15000)
         return True
     except Exception:
-        pass
+        # fallback: click any visible Show availability (may still work)
+        try:
+            page.get_by_text("Show availability", exact=False).first.click(timeout=15000)
+            return True
+        except Exception:
+            return False
 
-    # Fallback by text
-    try:
-        page.get_by_text("Show availability", exact=False).first.click(timeout=15000)
-        return True
-    except Exception:
-        return False
+
+def is_open_signal(page) -> tuple[bool, str]:
+    """
+    If bookings are open for the chosen dates/guests, the Campground card often shows
+    a 'Book now' button and price. If not, you often see the red criteria message.
+    """
+    body = page.inner_text("body").lower()
+
+    has_book_now = "book now" in body
+    has_criteria_error = "do not meet the required criteria" in body
+    has_sold_out = any(k in body for k in ["sold out", "unavailable", "no availability"])
+
+    if has_book_now and not has_criteria_error and not has_sold_out:
+        return True, "Book now visible and no error text."
+    return False, f"Signals: book_now={has_book_now}, criteria_error={has_criteria_error}, sold_out={has_sold_out}"
 
 
 def check_once():
@@ -185,45 +230,31 @@ def check_once():
         arrival_str = fmt_newbook(ARRIVAL)
         departure_str = fmt_newbook(DEPARTURE)
 
-        arrival_ok = fill_by_label(page, "Arrival date:", arrival_str)
-        departure_ok = fill_by_label(page, "Departure date:", departure_str)
-        guests_ok = set_guests(page, ADULTS)
+        arrival_ok = fill_input_near_text(page, "Arrival date:", arrival_str)
+        departure_ok = fill_input_near_text(page, "Departure date:", departure_str)
+        guests_ok = set_guests_and_apply(page, ADULTS)
 
         note = (
             f"arrival_ok={arrival_ok}, departure_ok={departure_ok}, guests_ok={guests_ok}, "
             f"arrival='{arrival_str}', departure='{departure_str}', adults={ADULTS}"
         )
 
-        show_ok = click_show_availability(page)
-        if not show_ok:
-            write_debug(page, "Could not click 'Show availability'. " + note)
-            browser.close()
-            return False, "CLOSED (could not open availability). " + note
+        # Click show availability (optional but helps refresh)
+        show_ok = click_show_availability_for_campground(page)
 
-        page.wait_for_timeout(8000)
+        # Wait for UI refresh
+        page.wait_for_timeout(6000)
 
-        body = page.inner_text("body").lower()
+        open_now, open_detail = is_open_signal(page)
 
-        # Signals
-        has_add_booking = "add booking" in body
-        has_checkout = "check out" in body or "checkout" in body
-        has_criteria_error = "do not meet the required criteria" in body
-        has_no_avail = any(k in body for k in ["no availability", "not available", "sold out", "unavailable"])
-
-        write_debug(page, "Run completed. " + note)
+        write_debug(page, f"{note}, show_ok={show_ok}, open_detail={open_detail}")
         browser.close()
 
-        if (has_add_booking or has_checkout) and not has_no_avail and not has_criteria_error:
-            return True, "OPEN signals found (Add Booking/Checkout). " + note
-
-        if has_criteria_error:
-            return False, "CLOSED (criteria error shown). " + note
-
-        return False, "CLOSED (no open signals). " + note
+        return open_now, f"{open_detail} | {note} | show_ok={show_ok}"
 
 
 def main():
-    # Optional: send a test email to confirm SMTP works
+    # 1-time test email to verify SMTP works
     if SEND_TEST_EMAIL:
         send_email(
             subject="Havasupai checker: test email ✅",
@@ -244,13 +275,14 @@ def main():
             f"{detail}\n"
             f"Checked: {now}\n\n"
             f"Go ASAP: {BOOK_URL}\n\n"
-            f"Tip: Add permits one at a time via 'Add Booking'."
+            f"Tip: You may need to click 'Book now' quickly; permits can vanish fast."
         )
         send_email(subject, body)
         state[key] = {"alerted": True, "last_alert": now}
         save_state(state)
         print("ALERT SENT:", detail)
     elif not is_open:
+        # reset alert so we can notify again when it becomes open later
         if already_alerted:
             state[key] = {"alerted": False}
             save_state(state)
