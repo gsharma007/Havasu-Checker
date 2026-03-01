@@ -29,7 +29,6 @@ jobs:
           DEPARTURE: "2026-05-28"
           ADULTS: "2"
 
-          # Set to "1" for ONE run to confirm SMTP works, then put back to "0"
           SEND_TEST_EMAIL: "0"
 
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
