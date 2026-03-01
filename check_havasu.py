@@ -9,7 +9,7 @@ STATE_FILE = "state.json"
 
 BOOK_URL = os.getenv("BOOK_URL", "https://bookingsus.newbook.cloud/online/havasupai")
 
-# Inputs: YYYY-MM-DD
+# Inputs
 ARRIVAL = os.getenv("ARRIVAL", "2026-05-25")
 DEPARTURE = os.getenv("DEPARTURE", "2026-05-28")
 ADULTS = int(os.getenv("ADULTS", "2"))
@@ -40,9 +40,7 @@ def save_state(state):
 
 def send_email(subject: str, body: str):
     if not all([SMTP_HOST, SMTP_USER, SMTP_PASS, ALERT_TO]):
-        raise RuntimeError(
-            "Missing SMTP env vars. Add GitHub Secrets: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, ALERT_TO"
-        )
+        raise RuntimeError("Missing SMTP env vars/secrets (SMTP_HOST/PORT/USER/PASS, ALERT_TO).")
 
     msg = EmailMessage()
     msg["From"] = SMTP_USER
@@ -56,14 +54,7 @@ def send_email(subject: str, body: str):
         s.send_message(msg)
 
 
-def fmt_newbook(date_yyyy_mm_dd: str) -> str:
-    # UI accepts like "May 25 2026"
-    dt = datetime.strptime(date_yyyy_mm_dd, "%Y-%m-%d")
-    return dt.strftime("%B %d %Y")
-
-
 def write_debug(page, note: str):
-    # Always capture artifacts so we can see what the runner saw
     try:
         page.screenshot(path="debug.png", full_page=True)
     except Exception:
@@ -80,43 +71,106 @@ def write_debug(page, note: str):
         pass
 
 
-def fill_input_near_text(page, label_text: str, value: str) -> bool:
+def parse_ymd(ymd: str):
+    dt = datetime.strptime(ymd, "%Y-%m-%d")
+    return dt.year, dt.month, dt.day, dt.strftime("%b %Y"), dt.strftime("%B %Y")
+
+
+def open_datepicker(page, which: str) -> bool:
     """
-    Works with this UI: the visible label is plain text ("Arrival date:")
-    and the input is the first following input element.
+    which: 'arrival' or 'departure'
+    Click the calendar icon next to the corresponding input.
     """
+    label = "Arrival date:" if which == "arrival" else "Departure date:"
     try:
-        lbl = page.get_by_text(label_text, exact=False)
+        lbl = page.get_by_text(label, exact=False)
         lbl.wait_for(state="visible", timeout=20000)
+        # calendar button is usually the first button following the input
+        # We'll find the first button after the label.
+        # Safer: locate the input after label, then its following button (calendar icon)
         inp = lbl.locator("xpath=following::input[1]")
         inp.wait_for(state="visible", timeout=20000)
-
-        inp.click(timeout=5000)
-        # replace whatever is there
-        inp.press("Control+A", timeout=2000)
-        inp.fill(value, timeout=5000)
-        inp.press("Tab", timeout=2000)
+        cal_btn = inp.locator("xpath=following::button[1]")
+        cal_btn.click(timeout=8000)
         return True
+    except Exception:
+        # fallback: try clicking any visible calendar icon buttons near the top
+        try:
+            page.locator("button").filter(has=page.locator("svg")).first.click(timeout=8000)
+            return True
+        except Exception:
+            return False
+
+
+def click_day_in_month_grid(page, month_name: str, day: int) -> bool:
+    """
+    Datepicker shows month header text like "May 2026".
+    Click the given day number under that month.
+    We scope by finding the month header, then clicking a day cell inside its panel.
+    """
+    # Month headers can appear as text nodes. We find the header and then its ancestor panel.
+    try:
+        header = page.get_by_text(month_name, exact=False)
+        header.wait_for(state="visible", timeout=20000)
+        panel = header.locator("xpath=ancestor::div[1]")
+        # Click the day within that panel.
+        # Use get_by_role('button') if days are buttons; otherwise click text.
+        # Try button first:
+        try:
+            panel.get_by_role("button", name=str(day), exact=True).click(timeout=8000)
+            return True
+        except Exception:
+            # fallback click text day inside panel (but avoid header text)
+            panel.get_by_text(str(day), exact=True).click(timeout=8000)
+            return True
     except Exception:
         return False
 
 
-def open_guests_popover(page) -> bool:
+def set_dates_via_datepicker(page, arrival_ymd: str, departure_ymd: str) -> tuple[bool, bool]:
     """
-    Click Guests value (e.g. '1A') so the popover with +/- and Apply opens.
+    Click calendar icon and choose arrival+departure days.
+    We assume datepicker shows the needed month (May 2026) with arrows, and often shows two months.
     """
+    ay, am, ad, a_mon_short, a_mon_long = parse_ymd(arrival_ymd)
+    dy, dm, dd, d_mon_short, d_mon_long = parse_ymd(departure_ymd)
+
+    # We’ll use long month format because your screenshot shows "May 2026".
+    arrival_month = a_mon_long
+    departure_month = d_mon_long
+
+    arrival_ok = False
+    departure_ok = False
+
+    if not open_datepicker(page, "arrival"):
+        return False, False
+
+    # In your UI, selecting range is: click start day then end day.
+    # We'll click both while picker is open.
+    arrival_ok = click_day_in_month_grid(page, arrival_month, ad)
+    departure_ok = click_day_in_month_grid(page, departure_month, dd)
+
+    # Close picker (Esc) to commit selection
     try:
-        # click the Guests input right after "Guests:"
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+
+    return arrival_ok, departure_ok
+
+
+def open_guests_popover(page) -> bool:
+    try:
         lbl = page.get_by_text("Guests:", exact=False)
         lbl.wait_for(state="visible", timeout=20000)
         guests_input = lbl.locator("xpath=following::input[1]")
         guests_input.wait_for(state="visible", timeout=20000)
-        guests_input.click(timeout=5000)
+        guests_input.click(timeout=8000)
         return True
     except Exception:
-        # fallback: click "1A" text if visible
+        # fallback click the value like "1A"
         try:
-            page.get_by_text("1A", exact=True).click(timeout=5000)
+            page.get_by_text("1A", exact=True).click(timeout=8000)
             return True
         except Exception:
             return False
@@ -124,77 +178,60 @@ def open_guests_popover(page) -> bool:
 
 def set_guests_and_apply(page, adults: int) -> bool:
     """
-    In your screenshot, guests are adjusted in a popover:
-    'People (over 6 years old):' with - / value / + and an Apply button.
+    Guests popover has +/- and Apply (as in your screenshot).
     """
     if not open_guests_popover(page):
         return False
 
-    # Find the popover by the text inside it
+    # Wait for popover text
     try:
-        pop = page.get_by_text("People (over 6 years old):", exact=False)
-        pop.wait_for(state="visible", timeout=20000)
+        page.get_by_text("People (over 6 years old):", exact=False).wait_for(timeout=20000)
     except Exception:
         return False
 
-    # The number box is typically an input in between - and +
-    # We'll locate the nearest input after that text.
+    # Find plus button in that popover area
     try:
-        count_input = page.get_by_text("People (over 6 years old):", exact=False).locator(
-            "xpath=following::input[1]"
-        )
-        count_input.wait_for(state="visible", timeout=20000)
-        current_raw = count_input.input_value(timeout=3000)
-        current = int("".join([c for c in current_raw if c.isdigit()]) or "1")
-    except Exception:
-        # If we can't read it, assume starting at 1
-        current = 1
+        # Scope to the popover by grabbing an ancestor of the label
+        pop = page.get_by_text("People (over 6 years old):", exact=False).locator("xpath=ancestor::div[1]")
+        # find numeric input (current count)
+        try:
+            count_input = pop.locator("input").first
+            current_raw = count_input.input_value(timeout=3000)
+            current = int("".join(c for c in current_raw if c.isdigit()) or "1")
+        except Exception:
+            current = 1
 
-    # Click + until we reach desired adults
-    try:
-        plus_btn = page.get_by_text("People (over 6 years old):", exact=False).locator(
-            "xpath=following::button[.='+' or contains(.,'+')][1]"
-        )
-        plus_btn.wait_for(state="visible", timeout=20000)
-
+        # find + button (often the last button in that small control)
+        plus = pop.locator("button").filter(has_text="+").first
         if adults > current:
             for _ in range(adults - current):
-                plus_btn.click(timeout=5000)
-    except Exception:
-        return False
+                plus.click(timeout=5000)
 
-    # Click Apply inside the popover
-    try:
-        apply_btn = page.locator("button:has-text('Apply')").filter(has_not=page.locator("[disabled]")).first
-        # If filter above is too strict, just click the first visible Apply:
-        try:
-            apply_btn.wait_for(state="visible", timeout=20000)
-            apply_btn.click(timeout=10000)
-        except Exception:
-            page.get_by_text("Apply", exact=True).click(timeout=10000)
+        # click Apply inside popover
+        pop.get_by_role("button", name="Apply").click(timeout=10000)
         return True
     except Exception:
-        return False
+        # fallback: click any visible Apply button
+        try:
+            page.get_by_role("button", name="Apply").click(timeout=10000)
+            return True
+        except Exception:
+            return False
 
 
 def click_show_availability_for_campground(page) -> bool:
     """
-    Click 'Show availability' on the Campground Permits card.
+    Click Show availability on the Campground Permits card (not Lodge).
     """
     try:
-        page.get_by_text("Campground Permits", exact=False).wait_for(timeout=30000)
-    except Exception:
-        return False
-
-    # Click first "Show availability" under campground section.
-    # (There is also one for Lodge, so we anchor near Campground Permits.)
-    try:
-        section = page.get_by_text("Campground Permits", exact=False).locator("xpath=ancestor::div[1]")
-        btn = section.get_by_text("Show availability", exact=False)
-        btn.first.click(timeout=15000)
+        title = page.get_by_text("Campground Permits", exact=False)
+        title.wait_for(timeout=30000)
+        card = title.locator("xpath=ancestor::div[1]")
+        btn = card.get_by_text("Show availability", exact=False).first
+        btn.click(timeout=15000)
         return True
     except Exception:
-        # fallback: click any visible Show availability (may still work)
+        # fallback: first visible Show availability
         try:
             page.get_by_text("Show availability", exact=False).first.click(timeout=15000)
             return True
@@ -202,20 +239,20 @@ def click_show_availability_for_campground(page) -> bool:
             return False
 
 
-def is_open_signal(page) -> tuple[bool, str]:
+def detect_open_for_correct_filters(page) -> tuple[bool, str]:
     """
-    If bookings are open for the chosen dates/guests, the Campground card often shows
-    a 'Book now' button and price. If not, you often see the red criteria message.
+    Strong signals only:
+    - "Add Booking" is best
+    - If criteria error appears, it's closed
     """
     body = page.inner_text("body").lower()
-
-    has_book_now = "book now" in body
+    has_add_booking = "add booking" in body
     has_criteria_error = "do not meet the required criteria" in body
-    has_sold_out = any(k in body for k in ["sold out", "unavailable", "no availability"])
+    has_no_avail = any(k in body for k in ["sold out", "unavailable", "no availability", "not available"])
 
-    if has_book_now and not has_criteria_error and not has_sold_out:
-        return True, "Book now visible and no error text."
-    return False, f"Signals: book_now={has_book_now}, criteria_error={has_criteria_error}, sold_out={has_sold_out}"
+    if has_add_booking and not has_criteria_error and not has_no_avail:
+        return True, "Add Booking found; no error text."
+    return False, f"Signals: add_booking={has_add_booking}, criteria_error={has_criteria_error}, no_avail={has_no_avail}"
 
 
 def check_once():
@@ -227,34 +264,28 @@ def check_once():
         page.goto(BOOK_URL, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(8000)
 
-        arrival_str = fmt_newbook(ARRIVAL)
-        departure_str = fmt_newbook(DEPARTURE)
-
-        arrival_ok = fill_input_near_text(page, "Arrival date:", arrival_str)
-        departure_ok = fill_input_near_text(page, "Departure date:", departure_str)
+        arrival_ok, departure_ok = set_dates_via_datepicker(page, ARRIVAL, DEPARTURE)
         guests_ok = set_guests_and_apply(page, ADULTS)
-
-        note = (
-            f"arrival_ok={arrival_ok}, departure_ok={departure_ok}, guests_ok={guests_ok}, "
-            f"arrival='{arrival_str}', departure='{departure_str}', adults={ADULTS}"
-        )
-
-        # Click show availability (optional but helps refresh)
         show_ok = click_show_availability_for_campground(page)
 
-        # Wait for UI refresh
-        page.wait_for_timeout(6000)
+        # Wait for UI to refresh results
+        page.wait_for_timeout(7000)
 
-        open_now, open_detail = is_open_signal(page)
+        note = f"arrival_ok={arrival_ok}, departure_ok={departure_ok}, guests_ok={guests_ok}, show_ok={show_ok}, arrival={ARRIVAL}, departure={DEPARTURE}, adults={ADULTS}"
 
-        write_debug(page, f"{note}, show_ok={show_ok}, open_detail={open_detail}")
+        # HARD GATE: never alert unless we successfully set everything + clicked show availability
+        if not (arrival_ok and departure_ok and guests_ok and show_ok):
+            write_debug(page, "Filters not set; treating as CLOSED. " + note)
+            browser.close()
+            return False, "CLOSED (filters not set). " + note
+
+        is_open, detail = detect_open_for_correct_filters(page)
+        write_debug(page, f"Run completed. {detail}. {note}")
         browser.close()
-
-        return open_now, f"{open_detail} | {note} | show_ok={show_ok}"
+        return is_open, f"{detail}. {note}"
 
 
 def main():
-    # 1-time test email to verify SMTP works
     if SEND_TEST_EMAIL:
         send_email(
             subject="Havasupai checker: test email ✅",
@@ -274,15 +305,13 @@ def main():
         body = (
             f"{detail}\n"
             f"Checked: {now}\n\n"
-            f"Go ASAP: {BOOK_URL}\n\n"
-            f"Tip: You may need to click 'Book now' quickly; permits can vanish fast."
+            f"Go ASAP: {BOOK_URL}\n"
         )
         send_email(subject, body)
         state[key] = {"alerted": True, "last_alert": now}
         save_state(state)
         print("ALERT SENT:", detail)
     elif not is_open:
-        # reset alert so we can notify again when it becomes open later
         if already_alerted:
             state[key] = {"alerted": False}
             save_state(state)
